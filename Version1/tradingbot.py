@@ -14,9 +14,9 @@ from alpaca_trade_api.rest import REST
 from timedelta import Timedelta
 from finbert_utils import estimate_sentiment
 
-API_KEY = "PKQQ047X0DYICHUNMY6D"
-API_SECRET = "mN18V0GvRncs2KVEiF2dROuKJM1eRxLAKXPtXZmC"
-BASE_URL = "https://paper-api.alpaca.markets"
+API_KEY = "PK4AFCPLTY9D4A2S5XCO"
+API_SECRET = "L1g2tiTHerwSdOJILl8XoG8aXaZZ0LRrOwUM2HsY"
+BASE_URL = "https://paper-api.alpaca.markets/v2"
 
 # Paper trading means not using real money
 ALPACA_CREDS = {
@@ -98,7 +98,7 @@ class MLTrader(Strategy):
 
 
 # Time period for backtesting
-start_date = datetime(2023, 1, 3)
+start_date = datetime(2020, 1, 3)
 end_date = datetime(2023, 12, 31)
 
 
