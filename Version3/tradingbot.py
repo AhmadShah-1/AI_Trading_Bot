@@ -15,48 +15,45 @@ from lumibot.traders import Trader
 from alpaca_trade_api.rest import REST
 
 from finbert_utils import estimate_sentiment
-from config import API_KEY, API_SECRET, BASE_URL
+from config import API_KEY, API_SECRET, BASE_URL  # Import from config
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 MODEL_FILENAME = "trained_model.pkl"
 
+# Check if model file exists
 if not os.path.exists(MODEL_FILENAME):
     raise FileNotFoundError(f"Missing {MODEL_FILENAME}. Please train your model first.")
 
+# Load the pre-trained model
 with open(MODEL_FILENAME, "rb") as f:
     TRAINED_MODEL = pickle.load(f)
 
 SYMBOL = "SPY"
+CASH_AT_RISK = 0.5
 SLEEPTIME = "24H"
 
 class MLTrader(Strategy):
     def initialize(self):
         self.symbol = SYMBOL
         self.sleeptime = SLEEPTIME
+        self.cash_at_risk = CASH_AT_RISK
         self.api = REST(base_url=BASE_URL, key_id=API_KEY, secret_key=API_SECRET)
         self.model = TRAINED_MODEL
 
-    def get_portfolio_value(self):
-        """
-        Sum up cash + the market value of all positions.
-        In Lumibot backtesting, self.get_positions() is typically a list of positions.
-        """
-        total_value = self.get_cash()
-        positions = self.get_positions()
-        for pos in positions:
-            sym = pos.symbol
-            last_price = self.get_last_price(sym)
-            total_value += (pos.quantity * last_price)
-        return total_value
+    def position_sizing(self):
+        cash = self.get_cash()
+        last_price = self.get_last_price(self.symbol)
+        quantity = int(cash * self.cash_at_risk / last_price)
+        return cash, last_price, quantity
 
     def on_trading_iteration(self):
+        cash, last_price, quantity = self.position_sizing()
         current_date = self.get_datetime().date()
-        logger.info(f"=== Trading iteration for {current_date} ===")
-
-        # 1) Fetch today's news
         date_str = current_date.strftime('%Y-%m-%d')
+
+        # 1) Fetch today's news from Alpaca
         news_items = self.api.get_news(
             symbol=self.symbol,
             start=date_str,
@@ -64,16 +61,12 @@ class MLTrader(Strategy):
             limit=50
         )
         headlines = [item.headline for item in news_items]
-        logger.debug(f"Fetched {len(headlines)} headlines for {current_date}: {headlines}")
-
         if headlines:
             sent_label, sent_conf = estimate_sentiment(headlines)
         else:
             sent_label, sent_conf = ("neutral", 0.0)
 
-        logger.debug(f"Sentiment => label={sent_label}, confidence={sent_conf:.3f}")
-
-        # 2) Fetch price data
+        # 2) Fetch today's price data from yfinance
         price_data = yf.download(
             self.symbol,
             start=current_date,
@@ -81,31 +74,28 @@ class MLTrader(Strategy):
         ).dropna()
 
         if price_data.empty:
-            logger.warning(f"No price data for {current_date}. Skipping iteration.")
+            logger.warning(f"No price data available for {current_date}. Skipping iteration.")
             return
 
+        # Convert price_data to a standard index
         price_data.reset_index(drop=True, inplace=True)
 
-        # -- CRITICAL: cast these to float --
-        open_price = float(price_data["Open"].iloc[0])
-        high_price = float(price_data["High"].iloc[0])
-        low_price = float(price_data["Low"].iloc[0])
-        close_price = float(price_data["Close"].iloc[0])
-        volume = float(price_data["Volume"].iloc[0])
-
-        logger.debug(
-            f"Price data => O={open_price:.2f}, H={high_price:.2f}, "
-            f"L={low_price:.2f}, C={close_price:.2f}, V={volume}"
-        )
+        # Extract the first row
+        open_price = price_data.iloc[0]["Open"]
+        high_price = price_data.iloc[0]["High"]
+        low_price = price_data.iloc[0]["Low"]
+        close_price = price_data.iloc[0]["Close"]
+        volume = price_data.iloc[0]["Volume"]
 
         # 3) Feature engineering
         daily_return = (close_price - open_price) / open_price
         daily_volatility = (high_price - low_price) / open_price
 
+        # Convert sentiment label to numeric
         mapping = {"negative": 0, "neutral": 1, "positive": 2}
         sent_label_encoded = mapping.get(sent_label, 1)
 
-        # 4) Build feature row
+        # 4) Build a DataFrame with the same columns as in training
         features_dict = {
             "Open": open_price,
             "High": high_price,
@@ -117,77 +107,46 @@ class MLTrader(Strategy):
             "sentiment_label_encoded": sent_label_encoded,
             "sentiment_confidence": sent_conf
         }
+        X_today = pd.DataFrame([features_dict], columns=[
+            "Open",
+            "High",
+            "Low",
+            "Close",
+            "Volume",
+            "daily_return",
+            "daily_volatility",
+            "sentiment_label_encoded",
+            "sentiment_confidence"
+        ])
 
-        X_today = pd.DataFrame([features_dict], columns=features_dict.keys()).astype(float)
+        # 5) Predict up (1) or down (0) for the next day
+        prediction = self.model.predict(X_today)[0]
 
-        # 5) Predict probability
-        if hasattr(self.model, "predict_proba"):
-            proba = self.model.predict_proba(X_today)[0]
-            prob_up = proba[1]
+        # 6) Check current position
+        position = self.get_position(self.symbol)
+
+        if prediction == 1:
+            # Buy signal
+            if position is None or position.quantity == 0:
+                if cash > (last_price * quantity):
+                    order = self.create_order(
+                        self.symbol,
+                        quantity,
+                        "buy",
+                        type="market"
+                    )
+                    self.submit_order(order)
+                    logger.info(f"BUY {quantity} shares of {self.symbol} at {last_price}")
         else:
-            pred = self.model.predict(X_today)[0]
-            prob_up = 1.0 if pred == 1 else 0.0
+            # Sell signal
+            if position is not None and position.quantity > 0:
+                self.sell_all()
+                logger.info(f"SELL all shares of {self.symbol}")
 
-        logger.info(f"Model prob_up={prob_up:.3f} for {current_date}")
-
-        # 6) fraction_invested = prob_up (0.0 to 1.0)
-        fraction_invested = max(0.0, min(prob_up, 1.0))
-        logger.debug(f"Fraction_invested={fraction_invested:.3f}")
-
-        # 7) portfolio_value
-        portfolio_value = self.get_portfolio_value()
-        logger.debug(f"Current portfolio_value={portfolio_value:.2f}")
-
-        if portfolio_value <= 0:
-            logger.warning("Portfolio value <= 0. Skipping iteration.")
-            return
-
-        last_price = self.get_last_price(self.symbol)
-        desired_shares = int((portfolio_value * fraction_invested) / last_price)
-        logger.debug(f"Desired_shares={desired_shares}")
-
-        current_position = self.get_position(self.symbol)
-        current_shares = current_position.quantity if current_position else 0
-        logger.debug(f"Current_shares={current_shares}")
-
-        difference = desired_shares - current_shares
-        logger.debug(f"Difference in shares={difference}")
-
-        # 8) place order
-        if difference > 0:
-            cash_available = self.get_cash()
-            cost_estimate = difference * last_price
-            if cost_estimate <= cash_available:
-                order = self.create_order(self.symbol, difference, "buy", "market")
-                self.submit_order(order)
-                logger.info(
-                    f"BUY {difference} => total {desired_shares}, "
-                    f"prob_up={prob_up:.3f}, fraction={fraction_invested:.3f}"
-                )
-            else:
-                logger.warning(
-                    f"Not enough cash to buy {difference} shares. "
-                    f"Needed={cost_estimate:.2f}, have={cash_available:.2f}"
-                )
-        elif difference < 0:
-            shares_to_sell = abs(difference)
-            order = self.create_order(self.symbol, shares_to_sell, "sell", "market")
-            self.submit_order(order)
-            logger.info(
-                f"SELL {shares_to_sell} => total {desired_shares}, "
-                f"prob_up={prob_up:.3f}, fraction={fraction_invested:.3f}"
-            )
-        else:
-            logger.info(
-                f"No trade. fraction_invested={fraction_invested:.3f}, "
-                f"current_shares={current_shares}, prob_up={prob_up:.3f}"
-            )
-
-
-# Backtest date range
+# Dates for backtesting
 TRAINING_END_DATE = datetime(2023, 3, 1)
 TESTING_START_DATE = TRAINING_END_DATE + timedelta(days=1)
-TESTING_END_DATE = datetime(2024, 4, 1)
+TESTING_END_DATE = datetime(2024, 5, 1)
 
 if __name__ == "__main__":
     ALPACA_CREDS = {
@@ -202,17 +161,18 @@ if __name__ == "__main__":
     strategy = MLTrader(
         name="MLTrader",
         broker=broker,
-        parameters={"symbol": SYMBOL}
+        parameters={"symbol": SYMBOL, "cash_at_risk": CASH_AT_RISK}
     )
 
+    # Backtest
     strategy.backtest(
         YahooDataBacktesting,
         TESTING_START_DATE,
         TESTING_END_DATE,
-        parameters={"symbol": SYMBOL}
+        parameters={"symbol": SYMBOL, "cash_at_risk": CASH_AT_RISK}
     )
 
-    # Uncomment if you want to run live:
+    # Uncomment to run live (paper or real) after confirming everything
     """
     trader = Trader()
     trader.add_strategy(strategy)

@@ -11,8 +11,8 @@ from finbert_utils import estimate_sentiment
 from config import API_KEY, API_SECRET, BASE_URL  # <--- your config
 
 SYMBOL = "SPY"
-START_DATE = datetime(2023, 1, 1)
-END_DATE = datetime(2023, 11, 1)
+START_DATE = datetime(2021, 6, 1)
+END_DATE = datetime(2023, 1, 1)
 CSV_FILENAME = "stock_data_with_news_20216_20231.csv"
 
 def main():
@@ -24,11 +24,9 @@ def main():
     price_data.dropna(inplace=True)
     print(f"Downloaded {len(price_data)} rows of price data.\n")
 
-    # If the columns are MultiIndex, drop the second level so we have normal columns.
     if isinstance(price_data.columns, pd.MultiIndex):
         price_data.columns = price_data.columns.droplevel(1)
 
-    # Convert Date index to a normal column named "date"
     df = price_data.copy()
     df.reset_index(inplace=True)
     df.rename(columns={"Date": "date"}, inplace=True)
@@ -39,14 +37,11 @@ def main():
     print(df.head(3))
     print()
 
-    # Convert "date" to pure Python date
     df["date"] = pd.to_datetime(df["date"]).dt.date
 
-    # Basic metrics
     df["daily_return"] = (df["Close"] - df["Open"]) / df["Open"]
     df["daily_volatility"] = (df["High"] - df["Low"]) / df["Open"]
 
-    # Columns to store sentiment
     df["sentiment_label"] = "neutral"
     df["sentiment_confidence"] = 0.0
     df["news_headlines"] = ""
@@ -54,16 +49,12 @@ def main():
     total_rows = len(df)
     print(f"Processing news for {total_rows} trading days...")
 
-    # Loop over each row/date and fetch news from Alpaca
     for i in range(total_rows):
         current_date = df.iloc[i]["date"]
         start_str = current_date.strftime("%Y-%m-%d")
         end_str = (current_date + timedelta(days=1)).strftime("%Y-%m-%d")
 
-        # Progress log
         print(f"[{i+1}/{total_rows}] Fetching news for {current_date}... ", end="")
-
-        # Fetch news
         try:
             news_items = api.get_news(
                 symbol=SYMBOL,

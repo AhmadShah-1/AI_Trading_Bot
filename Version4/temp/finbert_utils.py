@@ -11,12 +11,6 @@ model = AutoModelForSequenceClassification.from_pretrained("ProsusAI/finbert").t
 labels = ["positive", "negative", "neutral"]
 
 def estimate_sentiment(news: List[str]) -> Tuple[str, float]:
-    """
-    Estimate the average sentiment of a list of news headlines.
-    Returns:
-       sentiment_label (str): 'positive', 'negative', or 'neutral'.
-       confidence (float): Confidence (0 to 1) of that sentiment.
-    """
     if not news:
         return "neutral", 0.0
 
@@ -24,7 +18,6 @@ def estimate_sentiment(news: List[str]) -> Tuple[str, float]:
     with torch.no_grad():
         logits = model(tokens["input_ids"], attention_mask=tokens["attention_mask"])["logits"]
 
-    # Sum the logits across all headlines, then softmax for average sentiment
     summed_logits = torch.sum(logits, dim=0)
     probs = torch.nn.functional.softmax(summed_logits, dim=0)
 
@@ -35,7 +28,6 @@ def estimate_sentiment(news: List[str]) -> Tuple[str, float]:
     return sentiment_label, confidence
 
 if __name__ == "__main__":
-    # Quick test
     example_headlines = ["The markets responded positively today!", "Traders are thrilled."]
     label, conf = estimate_sentiment(example_headlines)
     print("Sentiment:", label, "Confidence:", conf)

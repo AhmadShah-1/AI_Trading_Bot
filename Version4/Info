@@ -1,0 +1,1 @@
+Uses LSTM Neural Network for prediction of future values of the stock price based on the past 60 days stock price.
